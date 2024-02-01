@@ -1,0 +1,6 @@
+<div class="response success">
+  <p>Success!</p>
+  <p>Your account {{ account_id }} has been successfully created on the <code>statelessnet</code>.</p>
+  <p>Public key was added: <code>{{ public_key }}</code>.</p>
+  <p>Happy hacking!</p>
+</div>

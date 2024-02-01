@@ -1,0 +1,6 @@
+<div class="response fail">
+  <p>Failed!</p>
+  <p>There was an error with creating your account:</p>
+  <p>{{ error_message }}</p>
+  <p>You can try again if you can correct the error, or ask for help in <a href="https://t.me/near_stake_wars">the Telegram group chat</a>.</p>
+</div>
