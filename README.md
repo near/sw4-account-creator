@@ -31,7 +31,7 @@ The server is configured using environment variables. The following variables ar
 - `BASE_SIGNER_ACCOUNT_ID` - Account ID of the top-level account that will sign transactions
 - `BASE_SIGNER_SECRET_KEY` - Private key of the top-level account
 - `FUNDING_AMOUNT` - Amount of NEAR tokens to fund new accounts with (default 100NEAR)
-- `PORT` - Port to listen on (default 10000)
+- `SERVER_PORT` - Port to listen on (default 10000)
 
 ## Getting Started
 
@@ -48,7 +48,7 @@ NEAR_RPC_URL=http://localhost:3030
 BASE_SIGNER_ACCOUNT_ID=near
 BASE_SIGNER_SECRET_KEY=ed25519:...
 FUNDING_AMOUNT=100000000000000000000000000
-PORT=10000
+SERVER_PORT=10000
 RUST_LOG=info
 ```
 
@@ -61,6 +61,6 @@ docker run --env-file .env -p 10000:10000 sw4-account-creator
 ## Usage
 
 ```bash
-./targer/release run --port 8080 --near-rpc-url http://localhost:3030 --base-signer-account-id near --base-signer-secret-key "ed25519:..." --funding-amount 100000000000000000000000000
+./targer/release run --server-port 8080 --near-rpc-url http://localhost:3030 --base-signer-account-id near --base-signer-secret-key "ed25519:..." --funding-amount 100000000000000000000000000
 ```
 

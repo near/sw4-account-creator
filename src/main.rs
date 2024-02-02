@@ -30,7 +30,7 @@ use tracing_subscriber::EnvFilter;
 struct Args {
     /// Port to listen on, default 10000
     #[clap(short, long, env, default_value_t = 10000)]
-    port: u16,
+    server_port: u16,
     /// NEAR RPC URL to send transactions to
     #[clap(long, env)]
     near_rpc_url: String,
@@ -311,7 +311,7 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::spawn(async move { update_block_hash(rpc.clone(), block_hash.clone()).await });
 
-    tracing::info!("Starting the HTTP server on port {}...", args.port);
+    tracing::info!("Starting the HTTP server on port {}...", args.server_port);
     // TODO: CORS to deny requests from other domains
     HttpServer::new(move || {
         App::new()
@@ -321,7 +321,7 @@ async fn main() -> anyhow::Result<()> {
             .route("/", web::get().to(index))
             .route("/create_account", web::post().to(create_account))
     })
-    .bind(format!("0.0.0.0:{:0>5}", args.port))?
+    .bind(format!("0.0.0.0:{:0>5}", args.server_port))?
     .run()
     .await?;
 
