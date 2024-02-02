@@ -6,6 +6,7 @@ use actix_files as fs;
 use actix_web::{error, web, App, HttpResponse, HttpServer, Responder, Result};
 use anyhow::Context as AnyhowContext;
 use clap::Parser;
+use dotenv::dotenv;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, Signer};
 use near_jsonrpc_client::{methods, JsonRpcClient};
@@ -19,6 +20,7 @@ use near_primitives_core::hash::CryptoHash;
 use near_primitives_core::types::{Balance, Nonce};
 use serde::Deserialize;
 use tera::{Context, Tera};
+use tracing_subscriber::EnvFilter;
 
 // ======== STRUCTURES ========
 
@@ -26,15 +28,18 @@ use tera::{Context, Tera};
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
-    /// Port to listen on, default 8080
-    #[clap(short, long, env, default_value_t = 8080)]
+    /// Port to listen on, default 10000
+    #[clap(short, long, env, default_value_t = 10000)]
     port: u16,
     /// NEAR RPC URL to send transactions to
     #[clap(long, env)]
     near_rpc_url: String,
-    /// Path to the base key file to use for signing transactions
+    /// Signer AccountId
     #[clap(long, env)]
-    base_key_file: String,
+    base_signer_account_id: String,
+    /// Signer SecretKey
+    #[clap(long, env)]
+    base_signer_secret_key: String,
     /// Amount to fund new accounts with, default 100 NEAR
     #[clap(long, env, default_value_t = 100_000_000_000_000_000_000_000_000)]
     funding_amount: Balance,
@@ -66,7 +71,7 @@ struct NearData {
 /// Index page repsonding with just a template rendering
 /// The template has a form for submission that should be handled by the method `create_account`
 async fn index(tera: web::Data<Tera>) -> Result<impl Responder> {
-    println!("index");
+    tracing::debug!("GET /");
     let _context = Context::new();
 
     let rendered = tera.render("index.html.tera", &_context).map_err(|err| {
@@ -85,6 +90,7 @@ async fn create_account(
     tera: web::Data<Tera>,
     form: web::Form<FormData>,
 ) -> Result<impl Responder> {
+    tracing::debug!("POST /create_account");
     let data = form.into_inner();
 
     let block_hash = *near.block_hash.read().unwrap();
@@ -105,9 +111,10 @@ async fn create_account(
     .await
     {
         Ok(_) => {
-            eprintln!(
+            tracing::info!(
                 "successfully created {} {}",
-                &data.account_id, &data.public_key
+                &data.account_id,
+                &data.public_key
             );
 
             let mut context = Context::new();
@@ -123,7 +130,7 @@ async fn create_account(
             }
         }
         Err(err) => {
-            eprintln!("cant create account: {:?}", err);
+            tracing::warn!("Failed to create account: {:?}", err);
             let mut context = Context::new();
             context.insert("error_message", format!("{:?}", err).as_str());
 
@@ -156,6 +163,11 @@ async fn send_create_account(
     block_hash: CryptoHash,
     funding_amount: Balance,
 ) -> anyhow::Result<()> {
+    tracing::debug!(
+        "Creating account {} with public key {}",
+        account_id,
+        public_key
+    );
     let new_account = AccountId::from_str(account_id)
         .with_context(|| format!("failed parsing account ID: {}", account_id))?;
     let pkey = PublicKey::from_str(public_key)
@@ -184,6 +196,7 @@ async fn send_create_account(
     let sig = base_signer.sign(hash.as_ref());
     let signed_transaction = SignedTransaction::new(sig, tx);
 
+    tracing::debug!("Sending transaction to NEAR RPC node...");
     // TODO: retry on nonce error
     match near_rpc
         .call(methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest { signed_transaction })
@@ -191,8 +204,10 @@ async fn send_create_account(
     {
         Ok(r) => {
             if matches!(r.status, FinalExecutionStatus::SuccessValue(_)) {
+                tracing::info!("transaction execution succeeded: {:?}", &r.status);
                 Ok(())
             } else {
+                tracing::warn!("transaction execution failed: {:?}", &r.status);
                 Err(anyhow::anyhow!(
                     "transaction execution failed: {:?}",
                     &r.status
@@ -205,6 +220,7 @@ async fn send_create_account(
 
 /// Fetches the current block hash from the NEAR RPC node
 async fn current_block_hash(near_rpc: &JsonRpcClient) -> std::io::Result<CryptoHash> {
+    tracing::debug!("Fetching current block hash from NEAR RPC node...");
     match near_rpc.call(methods::status::RpcStatusRequest).await {
         Ok(status) => Ok(status.sync_info.latest_block_hash),
         Err(e) => Err(std::io::Error::other(e)),
@@ -216,12 +232,12 @@ async fn current_block_hash(near_rpc: &JsonRpcClient) -> std::io::Result<CryptoH
 /// This is used to ensure that the block hash used in the transaction is always up to date
 async fn update_block_hash(near_rpc: JsonRpcClient, block_hash: Arc<RwLock<CryptoHash>>) {
     loop {
-        actix_rt::time::sleep(Duration::from_secs(30)).await;
-
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        tracing::debug!("Updating block hash...");
         let current = match current_block_hash(&near_rpc).await {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("failed fetching status from NEAR RPC node: {:?}", e);
+                tracing::warn!("failed to fetch current block hash: {:?}", e);
                 continue;
             }
         };
@@ -230,12 +246,30 @@ async fn update_block_hash(near_rpc: JsonRpcClient, block_hash: Arc<RwLock<Crypt
     }
 }
 
-#[actix_web::main]
+#[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    dotenv().ok();
+
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
+    tracing::info!(
+        "Starting {}:{}",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION")
+    );
+
     let args = Args::parse();
     let tera = Tera::new("templates/**/*").unwrap();
 
-    let base_signer = InMemorySigner::from_file(&std::path::Path::new(&args.base_key_file))?;
+    tracing::debug!("Parsing base signer account ID and secret key...");
+    let base_signer = InMemorySigner::from_secret_key(
+        AccountId::from_str(&args.base_signer_account_id)?,
+        near_crypto::SecretKey::from_str(&args.base_signer_secret_key)?,
+    );
+
+    tracing::debug!("Establishing connection to NEAR RPC node...");
     let rpc = JsonRpcClient::connect(&args.near_rpc_url);
     let nonce = match rpc
         .call(methods::query::RpcQueryRequest {
@@ -265,16 +299,19 @@ async fn main() -> anyhow::Result<()> {
     };
     let block_hash = Arc::new(RwLock::new(current_block_hash(&rpc).await?));
 
-    actix::spawn(update_block_hash(rpc.clone(), block_hash.clone()));
+    tracing::debug!("Spawning the block hash updater...");
 
     let near_data = NearData {
         base_signer,
         nonce,
-        block_hash,
-        rpc,
+        block_hash: block_hash.clone(),
+        rpc: rpc.clone(),
         funding_amount: args.funding_amount,
     };
-    println!("Starting server at: http://0.0.0.0:{}", args.port);
+
+    tokio::spawn(async move { update_block_hash(rpc.clone(), block_hash.clone()).await });
+
+    tracing::info!("Starting the HTTP server on port {}...", args.port);
     // TODO: CORS to deny requests from other domains
     HttpServer::new(move || {
         App::new()
@@ -284,8 +321,9 @@ async fn main() -> anyhow::Result<()> {
             .route("/", web::get().to(index))
             .route("/create_account", web::post().to(create_account))
     })
-    .bind(("0.0.0.0", args.port))?
+    .bind(format!("0.0.0.0:{:0>5}", args.port))?
     .run()
-    .await
-    .map_err(Into::into)
+    .await?;
+
+    Ok(())
 }

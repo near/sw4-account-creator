@@ -1,0 +1,20 @@
+# Ignore target directory
+target/
+
+# Ignore any build artifacts
+**/*.rs.bk
+
+# Ignore any generated files
+**/*.rs.gch
+**/*.rs.gcno
+**/*.rs.gcda
+
+# Ignore any editor-specific files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Ignore any version control files
+.git/
+.gitignore
