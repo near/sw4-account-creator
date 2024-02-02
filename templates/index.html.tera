@@ -17,10 +17,10 @@
       <div class="panel" id="#content__container">
         <h1>Create Account</h1>
         <form hx-post="/create_account" method="post" id="create_account" hx-swap="innerHTML">
-          <label for="username">Account Name</label>
-          <input type="text" name="account_id" id="account_id" required>
+          <label for="username">Account Name (<code>.statelessnet</code>)</label>
+          <input type="text" name="account_id" id="account_id" placeholder="<account_id>.statelessnet" required>
           <label for="public_key">Public Key</label>
-          <input type="text" name="public_key" id="public_key" required>
+          <input type="text" name="public_key" id="public_key" placeholder="ed25519:..." required>
           <input type="submit" value="Create Account">
         </form>
       </div>
