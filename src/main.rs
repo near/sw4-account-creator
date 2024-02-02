@@ -1,3 +1,7 @@
+use std::str::FromStr;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
+
 use actix_files as fs;
 use actix_web::{error, web, App, HttpResponse, HttpServer, Responder, Result};
 use anyhow::Context as AnyhowContext;
@@ -14,25 +18,51 @@ use near_primitives_core::account::AccessKey;
 use near_primitives_core::hash::CryptoHash;
 use near_primitives_core::types::{Balance, Nonce};
 use serde::Deserialize;
-use std::str::FromStr;
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
-use tera::ast::In;
 use tera::{Context, Tera};
 
-/// Simple server configuration
+// ======== STRUCTURES ========
+
+/// CLI arguments for the service
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
     /// Port to listen on, default 8080
-    #[clap(short, long, default_value_t = 8080)]
+    #[clap(short, long, env, default_value_t = 8080)]
     port: u16,
-    #[clap(long)]
+    /// NEAR RPC URL to send transactions to
+    #[clap(long, env)]
     near_rpc_url: String,
-    #[clap(long)]
+    /// Path to the base key file to use for signing transactions
+    #[clap(long, env)]
     base_key_file: String,
+    /// Amount to fund new accounts with, default 100 NEAR
+    #[clap(long, env, default_value_t = 100_000_000_000_000_000_000_000_000)]
+    funding_amount: Balance,
 }
 
+/// Structure for the form data from the index page
+/// We accept Strings from the user and need to validate the data later
+#[derive(Deserialize)]
+pub struct FormData {
+    account_id: String,
+    public_key: String,
+}
+
+/// Data shared between the actix-web handlers
+/// This is used to store the base signer, the nonce, the block hash, the NEAR RPC client and the funding amount
+/// Available as `near` (`web::Data`) in the actix-web handlers
+#[derive(Clone)]
+struct NearData {
+    base_signer: InMemorySigner,
+    nonce: Arc<Mutex<Nonce>>,
+    block_hash: Arc<RwLock<CryptoHash>>,
+    rpc: JsonRpcClient,
+    funding_amount: Balance,
+}
+
+// ======== ENDPOINTS ========
+
+/// Endpoint: /
 /// Index page repsonding with just a template rendering
 /// The template has a form for submission that should be handled by the method `create_account`
 async fn index(tera: web::Data<Tera>) -> Result<impl Responder> {
@@ -46,8 +76,77 @@ async fn index(tera: web::Data<Tera>) -> Result<impl Responder> {
     Ok(HttpResponse::Ok().content_type("text/html").body(rendered))
 }
 
+/// Endpoint: /create_account
+/// Handles the form submission from the index page
+/// Validates the form data and sends a transaction to create the account
+/// Responds with a success or error message (HTML)
+async fn create_account(
+    near: web::Data<NearData>,
+    tera: web::Data<Tera>,
+    form: web::Form<FormData>,
+) -> Result<impl Responder> {
+    let data = form.into_inner();
+
+    let block_hash = *near.block_hash.read().unwrap();
+    // for now we keep the lock while calling send_create_account(),
+    // but TODO is to not do that and just retry if the nonce fails
+    let mut nonce = near.nonce.lock().unwrap();
+    *nonce += 1;
+
+    match send_create_account(
+        &near.rpc,
+        &near.base_signer,
+        &data.account_id,
+        &data.public_key,
+        *nonce,
+        block_hash,
+        near.funding_amount,
+    )
+    .await
+    {
+        Ok(_) => {
+            eprintln!(
+                "successfully created {} {}",
+                &data.account_id, &data.public_key
+            );
+
+            let mut context = Context::new();
+            context.insert("account_id", &data.account_id);
+            context.insert("public_key", &data.public_key);
+
+            match tera.render("form_success.html.tera", &context) {
+                Ok(rendered) => Ok(HttpResponse::Ok().content_type("text/html").body(rendered)),
+                Err(err) => Err(error::ErrorInternalServerError(format!(
+                    "Failed to render template: {:?}",
+                    err
+                ))),
+            }
+        }
+        Err(err) => {
+            eprintln!("cant create account: {:?}", err);
+            let mut context = Context::new();
+            context.insert("error_message", format!("{:?}", err).as_str());
+
+            match tera.render("form_fail.html.tera", &context) {
+                Ok(rendered) => Ok(HttpResponse::Ok().content_type("text/html").body(rendered)),
+                Err(err) => Err(error::ErrorInternalServerError(format!(
+                    "Failed to render template: {:?}",
+                    err
+                ))),
+            }
+        }
+    }
+}
+
+// ======== PRIVATE FUNCTIONS ========
+
 // TODO: rate limit or somehow gate this faucet
 
+/// Creates a Transaction with actions:
+/// - CreateAccount
+/// - AddKey
+/// - Transfer (funding the account)
+/// Signs the transaction by the base signer and sends it to the NEAR RPC node
 async fn send_create_account(
     near_rpc: &JsonRpcClient,
     base_signer: &InMemorySigner,
@@ -104,70 +203,7 @@ async fn send_create_account(
     }
 }
 
-#[derive(Deserialize)]
-pub struct FormData {
-    account_id: String,
-    public_key: String,
-}
-
-#[derive(Clone)]
-struct NearData {
-    base_signer: InMemorySigner,
-    nonce: Arc<Mutex<Nonce>>,
-    block_hash: Arc<RwLock<CryptoHash>>,
-    rpc: JsonRpcClient,
-}
-
-async fn create_account(
-    near: web::Data<NearData>,
-    tera: web::Data<Tera>,
-    form: web::Form<FormData>,
-) -> Result<impl Responder> {
-    let data = form.into_inner();
-
-    let block_hash = *near.block_hash.read().unwrap();
-    // for now we keep the lock while calling send_create_account(),
-    // but TODO is to not do that and just retry if the nonce fails
-    let mut nonce = near.nonce.lock().unwrap();
-    *nonce += 1;
-
-    match send_create_account(
-        &near.rpc,
-        &near.base_signer,
-        &data.account_id,
-        &data.public_key,
-        *nonce,
-        block_hash,
-        100, // TODO: decide this
-    )
-    .await
-    {
-        Ok(_) => {
-            eprintln!(
-                "successfully created {} {}",
-                &data.account_id, &data.public_key
-            );
-
-            let mut context = Context::new();
-            context.insert("account_id", &data.account_id);
-            context.insert("public_key", &data.public_key);
-
-            match tera.render("form_success.html.tera", &context) {
-                Ok(rendered) => Ok(HttpResponse::Ok().content_type("text/html").body(rendered)),
-                Err(err) => Err(error::ErrorInternalServerError(format!(
-                    "Failed to render template: {:?}",
-                    err
-                ))),
-            }
-        }
-        Err(err) => {
-            eprintln!("cant create account: {:?}", err);
-            // TODO: send an http response that says it failed
-            Err(error::ErrorServiceUnavailable("Failed to create account"))
-        }
-    }
-}
-
+/// Fetches the current block hash from the NEAR RPC node
 async fn current_block_hash(near_rpc: &JsonRpcClient) -> std::io::Result<CryptoHash> {
     match near_rpc.call(methods::status::RpcStatusRequest).await {
         Ok(status) => Ok(status.sync_info.latest_block_hash),
@@ -175,6 +211,9 @@ async fn current_block_hash(near_rpc: &JsonRpcClient) -> std::io::Result<CryptoH
     }
 }
 
+/// Constantly updates the block hash in the given `Arc<RwLock<CryptoHash>>` every 30 seconds
+/// by fetching the latest block hash from the NEAR RPC node
+/// This is used to ensure that the block hash used in the transaction is always up to date
 async fn update_block_hash(near_rpc: JsonRpcClient, block_hash: Arc<RwLock<CryptoHash>>) {
     loop {
         actix_rt::time::sleep(Duration::from_secs(30)).await;
@@ -233,6 +272,7 @@ async fn main() -> anyhow::Result<()> {
         nonce,
         block_hash,
         rpc,
+        funding_amount: args.funding_amount,
     };
     println!("Starting server at: http://0.0.0.0:{}", args.port);
     // TODO: CORS to deny requests from other domains

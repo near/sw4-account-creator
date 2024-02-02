@@ -17,9 +17,9 @@
 - [ ] Response with a meaningul error message if the form is not valid
     - Validate account is not taken (as simple as possible)
     - Public key is a valid Ed25519 key
-- [ ] Craft a transaction to create the account
-- [ ] Sign the transaction with the key of the top-level account
-    - [ ] Top-level account and its key are configured in the settings
+- [x] Craft a transaction to create the account
+- [x] Sign the transaction with the key of the top-level account
+    - [x] Top-level account and its key are configured in the settings
 
 ## Getting Started
 [Instructions for setup and running the server]
