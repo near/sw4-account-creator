@@ -53,6 +53,23 @@ pub struct FormData {
     public_key: String,
 }
 
+impl FormData {
+    /// Normalizes the form data by trimming whitespace from the strings
+    fn normalize(self, base_signer_account_id: &str) -> Self {
+        let account_id = self.account_id.trim().to_string();
+        // If account_id provided by the user does not end with .statelessnet, we add it
+        let account_id = if account_id.ends_with(".statelessnet") {
+            account_id
+        } else {
+            format!("{}.{}", account_id, base_signer_account_id)
+        };
+        FormData {
+            account_id,
+            public_key: self.public_key.trim().to_string(),
+        }
+    }
+}
+
 /// Data shared between the actix-web handlers
 /// This is used to store the base signer, the nonce, the block hash, the NEAR RPC client and the funding amount
 /// Available as `near` (`web::Data`) in the actix-web handlers
@@ -91,7 +108,11 @@ async fn create_account(
     form: web::Form<FormData>,
 ) -> Result<impl Responder> {
     tracing::debug!("POST /create_account");
-    let data = form.into_inner();
+    // Normalization happens here, we don't validate the account_id for the validity of the NEAR account id
+    // we expect the validation to happen during the parsing of the form data in `send_create_account()` function
+    let data = form
+        .into_inner()
+        .normalize(near.base_signer.account_id.as_str());
 
     let block_hash = *near.block_hash.read().unwrap();
     // for now we keep the lock while calling send_create_account(),
