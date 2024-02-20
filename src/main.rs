@@ -1,5 +1,6 @@
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use actix_files as fs;
@@ -9,11 +10,13 @@ use clap::Parser;
 use dotenv::dotenv;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, Signer};
-use near_jsonrpc_client::errors::JsonRpcError;
+use near_jsonrpc_client::errors::{JsonRpcError, JsonRpcServerError};
 use near_jsonrpc_client::methods::status::{RpcStatusError, RpcStatusRequest};
 use near_jsonrpc_client::{methods, JsonRpcClient};
 use near_jsonrpc_primitives::types::query::QueryResponseKind;
+use near_jsonrpc_primitives::types::transactions::RpcTransactionError;
 use near_primitives::action::{Action, AddKeyAction, CreateAccountAction, TransferAction};
+use near_primitives::errors::{InvalidTxError, TxExecutionError};
 use near_primitives::transaction::{SignedTransaction, Transaction};
 use near_primitives::types::{BlockReference, Finality};
 use near_primitives::views::FinalExecutionStatus;
@@ -78,7 +81,7 @@ impl FormData {
 #[derive(Clone)]
 struct NearData {
     base_signer: InMemorySigner,
-    nonce: Arc<Mutex<Nonce>>,
+    nonce: Arc<AtomicU64>,
     block_hash: Arc<RwLock<CryptoHash>>,
     rpc: JsonRpcClient,
     funding_amount: Balance,
@@ -117,17 +120,13 @@ async fn create_account(
         .normalize(near.base_signer.account_id.as_str());
 
     let block_hash = *near.block_hash.read().unwrap();
-    // for now we keep the lock while calling send_create_account(),
-    // but TODO is to not do that and just retry if the nonce fails
-    let mut nonce = near.nonce.lock().unwrap();
-    *nonce += 1;
 
     match send_create_account(
         &near.rpc,
         &near.base_signer,
         &data.account_id,
         &data.public_key,
-        *nonce,
+        near.nonce.as_ref(),
         block_hash,
         near.funding_amount,
     )
@@ -168,6 +167,28 @@ async fn create_account(
     }
 }
 
+/// Returns a nonce greater than both the nonces we know are too small.
+fn new_nonce(nonce1: Nonce, nonce2: Nonce) -> Nonce {
+    std::cmp::max(nonce1, nonce2) + 1
+}
+
+/// Returns and stores in `nonce` a new nonce to try with after getting an InvalidNonce{ tx_nonce, ak_nonce } error
+fn retry_nonce(nonce: &AtomicU64, old_nonce: Nonce, tx_nonce: Nonce, ak_nonce: Nonce) -> Nonce {
+    if tx_nonce != old_nonce {
+        tracing::warn!(
+            "NEAR RPC node reported that our transaction's nonce was {}, when we remember sending {}",
+            tx_nonce, old_nonce
+        );
+    }
+    let prev_nonce = nonce
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+            Some(new_nonce(n, ak_nonce))
+        })
+        .unwrap();
+    // now we call new_nonce() again because fetch_update() returns the old value
+    new_nonce(prev_nonce, ak_nonce)
+}
+
 // ======== PRIVATE FUNCTIONS ========
 
 // TODO: rate limit or somehow gate this faucet
@@ -182,7 +203,7 @@ async fn send_create_account(
     base_signer: &InMemorySigner,
     account_id: &str,
     public_key: &str,
-    nonce: Nonce,
+    nonce: &AtomicU64,
     block_hash: CryptoHash,
     funding_amount: Balance,
 ) -> anyhow::Result<()> {
@@ -206,38 +227,77 @@ async fn send_create_account(
             deposit: funding_amount,
         }),
     ];
+    let mut next_nonce = nonce.fetch_add(1, Ordering::SeqCst) + 1;
 
-    let tx = Transaction {
-        signer_id: base_signer.account_id.clone(),
-        public_key: base_signer.public_key.clone(),
-        nonce,
-        receiver_id: new_account,
-        block_hash,
-        actions,
-    };
-    let (hash, _size) = tx.get_hash_and_size();
-    let sig = base_signer.sign(hash.as_ref());
-    let signed_transaction = SignedTransaction::new(sig, tx);
+    loop {
+        let tx = Transaction {
+            signer_id: base_signer.account_id.clone(),
+            public_key: base_signer.public_key.clone(),
+            nonce: next_nonce,
+            receiver_id: new_account.clone(),
+            block_hash,
+            actions: actions.clone(),
+        };
+        let (hash, _size) = tx.get_hash_and_size();
+        let sig = base_signer.sign(hash.as_ref());
+        let signed_transaction = SignedTransaction::new(sig, tx.clone());
 
-    tracing::debug!("Sending transaction to NEAR RPC node...");
-    // TODO: retry on nonce error
-    match near_rpc
-        .call(methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest { signed_transaction })
-        .await
-    {
-        Ok(r) => {
-            if matches!(r.status, FinalExecutionStatus::SuccessValue(_)) {
-                tracing::info!("transaction execution succeeded: {:?}", &r.status);
-                Ok(())
-            } else {
-                tracing::warn!("transaction execution failed: {:?}", &r.status);
-                Err(anyhow::anyhow!(
-                    "transaction execution failed: {:?}",
-                    &r.status
-                ))
+        tracing::debug!(
+            "Sending transaction creating {} with nonce {} to NEAR RPC node...",
+            account_id,
+            next_nonce
+        );
+        match near_rpc
+            .call(methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest { signed_transaction })
+            .await
+        {
+            Ok(r) => match r.status {
+                FinalExecutionStatus::SuccessValue(_) => {
+                    tracing::info!(
+                        "transaction execution succeeded for {}: {:?}",
+                        account_id,
+                        &r.status
+                    );
+                    return Ok(());
+                }
+                // looks like this one doesn't show up, and instead we get an Err(JsonRpcError) in this case,
+                // but might as well handle this case here too
+                FinalExecutionStatus::Failure(TxExecutionError::InvalidTxError(
+                    InvalidTxError::InvalidNonce { tx_nonce, ak_nonce },
+                )) => {
+                    next_nonce = retry_nonce(nonce, next_nonce, tx_nonce, ak_nonce);
+                    tracing::debug!(
+                        "retrying creating {} with nonce {} after nonce {} was rejected with current access key nonce {}",
+                        account_id,
+                        next_nonce,
+                        tx_nonce,
+                        ak_nonce,
+                    );
+                }
+                _ => {
+                    tracing::warn!("transaction execution failed: {:?}", &r.status);
+                    return Err(anyhow::anyhow!(
+                        "transaction execution failed: {:?}",
+                        &r.status
+                    ));
+                }
+            },
+            Err(JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
+                RpcTransactionError::InvalidTransaction {
+                    context: InvalidTxError::InvalidNonce { tx_nonce, ak_nonce },
+                },
+            ))) => {
+                next_nonce = retry_nonce(nonce, next_nonce, tx_nonce, ak_nonce);
+                tracing::debug!(
+                    "retrying creating {} with nonce {} after nonce {} was rejected with current access key nonce {}",
+                    account_id,
+                    next_nonce,
+                    tx_nonce,
+                    ak_nonce,
+                );
             }
-        }
-        Err(e) => Err(e.into()),
+            Err(e) => return Err(e.into()),
+        };
     }
 }
 
@@ -307,7 +367,7 @@ async fn main() -> anyhow::Result<()> {
         .await
     {
         Ok(r) => match r.kind {
-            QueryResponseKind::AccessKey(a) => Arc::new(Mutex::new(a.nonce)),
+            QueryResponseKind::AccessKey(a) => Arc::new(AtomicU64::new(a.nonce)),
             _ => anyhow::bail!(
                 "received unexpected query response when getting access key info: {:?}",
                 r.kind
