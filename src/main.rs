@@ -9,6 +9,8 @@ use clap::Parser;
 use dotenv::dotenv;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, Signer};
+use near_jsonrpc_client::errors::JsonRpcError;
+use near_jsonrpc_client::methods::status::{RpcStatusError, RpcStatusRequest};
 use near_jsonrpc_client::{methods, JsonRpcClient};
 use near_jsonrpc_primitives::types::query::QueryResponseKind;
 use near_primitives::action::{Action, AddKeyAction, CreateAccountAction, TransferAction};
@@ -240,12 +242,14 @@ async fn send_create_account(
 }
 
 /// Fetches the current block hash from the NEAR RPC node
-async fn current_block_hash(near_rpc: &JsonRpcClient) -> std::io::Result<CryptoHash> {
+async fn current_block_hash(
+    near_rpc: &JsonRpcClient,
+) -> Result<CryptoHash, JsonRpcError<RpcStatusError>> {
     tracing::debug!("Fetching current block hash from NEAR RPC node...");
-    match near_rpc.call(methods::status::RpcStatusRequest).await {
-        Ok(status) => Ok(status.sync_info.latest_block_hash),
-        Err(e) => Err(std::io::Error::other(e)),
-    }
+    near_rpc
+        .call(RpcStatusRequest)
+        .await
+        .map(|status| status.sync_info.latest_block_hash)
 }
 
 /// Constantly updates the block hash in the given `Arc<RwLock<CryptoHash>>` every 30 seconds
@@ -318,7 +322,11 @@ async fn main() -> anyhow::Result<()> {
             );
         }
     };
-    let block_hash = Arc::new(RwLock::new(current_block_hash(&rpc).await?));
+    let block_hash = Arc::new(RwLock::new(
+        current_block_hash(&rpc)
+            .await
+            .context("failed fetching latest block hash")?,
+    ));
 
     tracing::debug!("Spawning the block hash updater...");
 
