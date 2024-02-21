@@ -17,7 +17,7 @@
 - [ ] Response with a meaningul error message if the form is not valid
     - Validate account is not taken (as simple as possible)
     - Public key is a valid Ed25519 key
-- [ ] Retry in case of nonce conflict
+- [x] Retry in case of nonce conflict
 - [ ] (Optional) Protect from spamming
 - [x] Craft a transaction to create the account
 - [x] Sign the transaction with the key of the top-level account
