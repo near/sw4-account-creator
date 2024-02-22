@@ -21,3 +21,13 @@ tracing = "0.1.28"
 tracing-subscriber = "0.2.16"
 serde = { version = "1.0.130", features = ["derive"] }
 serde_json = "1.0.68"
+
+actix-cors = "0.7.0"
+sqlx = { version = "0.7.3", features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+] }
+
+# [features]
+# contract-helper = []
