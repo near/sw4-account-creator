@@ -1,7 +1,9 @@
 use actix_web::web;
 
+use account_activity::account_activity_handler;
 use account_by_public_key::account_by_public_key_handler;
 
+mod account_activity;
 mod account_by_public_key;
 
 // Function to create and return the accounts scope
@@ -11,6 +13,10 @@ pub fn account_scope() -> actix_web::Scope {
         .route(
             "/keys/{public_key}",
             web::get().to(account_by_public_key_handler),
+        )
+        .route(
+            "/{account_id}/txns",
+            web::get().to(account_activity_handler),
         )
 }
 
