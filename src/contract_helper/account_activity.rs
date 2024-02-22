@@ -20,6 +20,11 @@ pub(crate) async fn account_activity_handler(
     let page = query_params.page.unwrap_or(1);
     let per_page = query_params.per_page.unwrap_or(10);
 
+    tracing::debug!(
+        "account_activity_handler called. account_id: {:?}, order: {:?}, page: {:?}, per_page: {:?}",
+        account_id, order, page, per_page
+    );
+
     // Calculate offset for pagination
     let offset = (page - 1) * per_page;
 

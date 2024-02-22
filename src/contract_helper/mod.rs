@@ -2,17 +2,23 @@ use actix_web::web;
 
 use account_activity::account_activity_handler;
 use account_by_public_key::account_by_public_key_handler;
+use account_likely_tokens::account_likely_tokens_handler;
 
 mod account_activity;
 mod account_by_public_key;
+mod account_likely_tokens;
 
 // Function to create and return the accounts scope
 pub fn account_scope() -> actix_web::Scope {
-    web::scope("/accounts")
+    web::scope("/account")
         // .route("/create", web::get().to(create_account_handler))
         .route(
             "/keys/{public_key}",
             web::get().to(account_by_public_key_handler),
+        )
+        .route(
+            "/{account_id}/likelyTokensFromBlock",
+            web::get().to(account_likely_tokens_handler),
         )
         .route(
             "/{account_id}/txns",

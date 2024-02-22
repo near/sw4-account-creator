@@ -5,6 +5,10 @@ pub(crate) async fn account_by_public_key_handler(
     pool: web::Data<PgPool>,
     public_key: web::Path<String>,
 ) -> Result<impl Responder> {
+    tracing::debug!(
+        "account_by_public_key_handler called. public_key: {:?}",
+        public_key
+    );
     let public_key = public_key.into_inner();
 
     let result: Option<serde_json::Value> = sqlx::query_scalar(
