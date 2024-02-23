@@ -27,7 +27,7 @@
     - [x] `GET account/{account_id}/txns` Finds all the transactions for the given account
     - [x] `GET account/{account_id}/likelyTokensFromBlock` Finds all the assets most likely to be [fungible] tokens for the given account from the given block
     - [x] `GET account/{account_id}/likeleNFTsFromBlock` Finds all the assets most likely to be NFTs for the given account from the given block
-    - [ ] `POST account/create` Creates a new account with the given `account_id` and `public_key`
+    - [x] `POST account/create` Creates a new account with the given `account_id` and `public_key`
 
 ## Configuration
 

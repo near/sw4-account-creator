@@ -1,34 +1,27 @@
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
 use actix_files as fs;
 use actix_web::{error, web, App, HttpResponse, HttpServer, Responder, Result};
-use anyhow::Context as AnyhowContext;
+use anyhow::Context as _;
 use clap::Parser;
 use dotenv::dotenv;
 use near_account_id::AccountId;
-use near_crypto::{InMemorySigner, PublicKey, Signer};
-use near_jsonrpc_client::errors::{JsonRpcError, JsonRpcServerError};
-use near_jsonrpc_client::methods::status::{RpcStatusError, RpcStatusRequest};
+use near_crypto::InMemorySigner;
 use near_jsonrpc_client::{methods, JsonRpcClient};
 use near_jsonrpc_primitives::types::query::QueryResponseKind;
-use near_jsonrpc_primitives::types::transactions::RpcTransactionError;
-use near_primitives::action::{Action, AddKeyAction, CreateAccountAction, TransferAction};
-use near_primitives::errors::{InvalidTxError, TxExecutionError};
-use near_primitives::transaction::{SignedTransaction, Transaction};
 use near_primitives::types::{BlockReference, Finality};
-use near_primitives::views::FinalExecutionStatus;
-use near_primitives_core::account::AccessKey;
 use near_primitives_core::hash::CryptoHash;
-use near_primitives_core::types::{Balance, Nonce};
+use near_primitives_core::types::Balance;
 use serde::Deserialize;
 use tera::{Context, Tera};
 use tracing_subscriber::EnvFilter;
 
 #[cfg(feature = "contract-helper")]
 mod contract_helper;
+mod create_account;
+mod utils;
 
 // ======== STRUCTURES ========
 
@@ -70,11 +63,12 @@ impl FormData {
     fn normalize(self, base_signer_account_id: &str) -> Self {
         let account_id = self.account_id.trim().to_string();
         // If account_id provided by the user does not end with .statelessnet, we add it
-        let account_id = if account_id.ends_with(".statelessnet") {
-            account_id
-        } else {
-            format!("{}.{}", account_id, base_signer_account_id)
-        };
+        let account_id =
+            if account_id.ends_with(format!(".{}", base_signer_account_id).to_string().as_str()) {
+                account_id
+            } else {
+                format!("{}.{}", account_id, base_signer_account_id)
+            };
         FormData {
             account_id,
             public_key: self.public_key.trim().to_string(),
@@ -86,12 +80,12 @@ impl FormData {
 /// This is used to store the base signer, the nonce, the block hash, the NEAR RPC client and the funding amount
 /// Available as `near` (`web::Data`) in the actix-web handlers
 #[derive(Clone)]
-struct NearData {
-    base_signer: InMemorySigner,
-    nonce: Arc<AtomicU64>,
-    block_hash: Arc<RwLock<CryptoHash>>,
-    rpc: JsonRpcClient,
-    funding_amount: Balance,
+pub(crate) struct NearData {
+    pub(crate) base_signer: InMemorySigner,
+    pub(crate) nonce: Arc<AtomicU64>,
+    pub(crate) block_hash: Arc<RwLock<CryptoHash>>,
+    pub(crate) rpc: JsonRpcClient,
+    pub(crate) funding_amount: Balance,
 }
 
 // ======== ENDPOINTS ========
@@ -128,7 +122,7 @@ async fn create_account(
 
     let block_hash = *near.block_hash.read().unwrap();
 
-    match send_create_account(
+    match create_account::send_create_account(
         &near.rpc,
         &near.base_signer,
         &data.account_id,
@@ -171,170 +165,6 @@ async fn create_account(
                 ))),
             }
         }
-    }
-}
-
-/// Returns a nonce greater than both the nonces we know are too small.
-fn new_nonce(nonce1: Nonce, nonce2: Nonce) -> Nonce {
-    std::cmp::max(nonce1, nonce2) + 1
-}
-
-/// Returns and stores in `nonce` a new nonce to try with after getting an InvalidNonce{ tx_nonce, ak_nonce } error
-fn retry_nonce(nonce: &AtomicU64, old_nonce: Nonce, tx_nonce: Nonce, ak_nonce: Nonce) -> Nonce {
-    if tx_nonce != old_nonce {
-        tracing::warn!(
-            "NEAR RPC node reported that our transaction's nonce was {}, when we remember sending {}",
-            tx_nonce, old_nonce
-        );
-    }
-    let prev_nonce = nonce
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-            Some(new_nonce(n, ak_nonce))
-        })
-        .unwrap();
-    // now we call new_nonce() again because fetch_update() returns the old value
-    new_nonce(prev_nonce, ak_nonce)
-}
-
-// ======== PRIVATE FUNCTIONS ========
-
-// TODO: rate limit or somehow gate this faucet
-
-/// Creates a Transaction with actions:
-/// - CreateAccount
-/// - AddKey
-/// - Transfer (funding the account)
-/// Signs the transaction by the base signer and sends it to the NEAR RPC node
-async fn send_create_account(
-    near_rpc: &JsonRpcClient,
-    base_signer: &InMemorySigner,
-    account_id: &str,
-    public_key: &str,
-    nonce: &AtomicU64,
-    block_hash: CryptoHash,
-    funding_amount: Balance,
-) -> anyhow::Result<()> {
-    tracing::debug!(
-        "Creating account {} with public key {}",
-        account_id,
-        public_key
-    );
-    let new_account = AccountId::from_str(account_id)
-        .with_context(|| format!("failed parsing account ID: {}", account_id))?;
-    let pkey = PublicKey::from_str(public_key)
-        .with_context(|| format!("failed parsing public key: {}", public_key))?;
-
-    let actions = vec![
-        Action::CreateAccount(CreateAccountAction {}),
-        Action::AddKey(Box::new(AddKeyAction {
-            public_key: pkey,
-            access_key: AccessKey::full_access(),
-        })),
-        Action::Transfer(TransferAction {
-            deposit: funding_amount,
-        }),
-    ];
-    let mut next_nonce = nonce.fetch_add(1, Ordering::SeqCst) + 1;
-
-    loop {
-        let tx = Transaction {
-            signer_id: base_signer.account_id.clone(),
-            public_key: base_signer.public_key.clone(),
-            nonce: next_nonce,
-            receiver_id: new_account.clone(),
-            block_hash,
-            actions: actions.clone(),
-        };
-        let (hash, _size) = tx.get_hash_and_size();
-        let sig = base_signer.sign(hash.as_ref());
-        let signed_transaction = SignedTransaction::new(sig, tx.clone());
-
-        tracing::debug!(
-            "Sending transaction creating {} with nonce {} to NEAR RPC node...",
-            account_id,
-            next_nonce
-        );
-        match near_rpc
-            .call(methods::broadcast_tx_commit::RpcBroadcastTxCommitRequest { signed_transaction })
-            .await
-        {
-            Ok(r) => match r.status {
-                FinalExecutionStatus::SuccessValue(_) => {
-                    tracing::info!(
-                        "transaction execution succeeded for {}: {:?}",
-                        account_id,
-                        &r.status
-                    );
-                    return Ok(());
-                }
-                // looks like this one doesn't show up, and instead we get an Err(JsonRpcError) in this case,
-                // but might as well handle this case here too
-                FinalExecutionStatus::Failure(TxExecutionError::InvalidTxError(
-                    InvalidTxError::InvalidNonce { tx_nonce, ak_nonce },
-                )) => {
-                    next_nonce = retry_nonce(nonce, next_nonce, tx_nonce, ak_nonce);
-                    tracing::debug!(
-                        "retrying creating {} with nonce {} after nonce {} was rejected with current access key nonce {}",
-                        account_id,
-                        next_nonce,
-                        tx_nonce,
-                        ak_nonce,
-                    );
-                }
-                _ => {
-                    tracing::warn!("transaction execution failed: {:?}", &r.status);
-                    return Err(anyhow::anyhow!(
-                        "transaction execution failed: {:?}",
-                        &r.status
-                    ));
-                }
-            },
-            Err(JsonRpcError::ServerError(JsonRpcServerError::HandlerError(
-                RpcTransactionError::InvalidTransaction {
-                    context: InvalidTxError::InvalidNonce { tx_nonce, ak_nonce },
-                },
-            ))) => {
-                next_nonce = retry_nonce(nonce, next_nonce, tx_nonce, ak_nonce);
-                tracing::debug!(
-                    "retrying creating {} with nonce {} after nonce {} was rejected with current access key nonce {}",
-                    account_id,
-                    next_nonce,
-                    tx_nonce,
-                    ak_nonce,
-                );
-            }
-            Err(e) => return Err(e.into()),
-        };
-    }
-}
-
-/// Fetches the current block hash from the NEAR RPC node
-async fn current_block_hash(
-    near_rpc: &JsonRpcClient,
-) -> Result<CryptoHash, JsonRpcError<RpcStatusError>> {
-    tracing::debug!("Fetching current block hash from NEAR RPC node...");
-    near_rpc
-        .call(RpcStatusRequest)
-        .await
-        .map(|status| status.sync_info.latest_block_hash)
-}
-
-/// Constantly updates the block hash in the given `Arc<RwLock<CryptoHash>>` every 30 seconds
-/// by fetching the latest block hash from the NEAR RPC node
-/// This is used to ensure that the block hash used in the transaction is always up to date
-async fn update_block_hash(near_rpc: JsonRpcClient, block_hash: Arc<RwLock<CryptoHash>>) {
-    loop {
-        tokio::time::sleep(Duration::from_secs(30)).await;
-        tracing::debug!("Updating block hash...");
-        let current = match current_block_hash(&near_rpc).await {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!("failed to fetch current block hash: {:?}", e);
-                continue;
-            }
-        };
-        let mut b = block_hash.write().unwrap();
-        *b = current;
     }
 }
 
@@ -393,7 +223,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let block_hash = Arc::new(RwLock::new(
-        current_block_hash(&rpc)
+        utils::block_hash::current_block_hash(&rpc)
             .await
             .context("failed fetching latest block hash")?,
     ));
@@ -408,7 +238,9 @@ async fn main() -> anyhow::Result<()> {
         funding_amount: args.funding_amount,
     };
 
-    tokio::spawn(async move { update_block_hash(rpc.clone(), block_hash.clone()).await });
+    tokio::spawn(async move {
+        utils::block_hash::update_block_hash(rpc.clone(), block_hash.clone()).await
+    });
 
     tracing::info!("Starting the HTTP server on port {}...", args.server_port);
 
