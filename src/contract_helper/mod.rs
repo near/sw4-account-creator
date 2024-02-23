@@ -2,10 +2,12 @@ use actix_web::web;
 
 use account_activity::account_activity_handler;
 use account_by_public_key::account_by_public_key_handler;
+use account_likely_nfts::account_likely_nfts_handler;
 use account_likely_tokens::account_likely_tokens_handler;
 
 mod account_activity;
 mod account_by_public_key;
+mod account_likely_nfts;
 mod account_likely_tokens;
 
 // Function to create and return the accounts scope
@@ -23,6 +25,10 @@ pub fn account_scope() -> actix_web::Scope {
         .route(
             "/{account_id}/txns",
             web::get().to(account_activity_handler),
+        )
+        .route(
+            "/{account_id}/likelyNFTsFromBlock",
+            web::get().to(account_likely_nfts_handler),
         )
 }
 
