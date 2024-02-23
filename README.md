@@ -22,6 +22,12 @@
 - [x] Craft a transaction to create the account
 - [x] Sign the transaction with the key of the top-level account
     - [x] Top-level account and its key are configured in the settings
+- [ ] **Feature** `contract-helper` that provides essential API for the Wallets (similar to the `contract-helper`)
+    - [x] `GET account/keys/{public_key}` Finds all the accounts with the given public key
+    - [x] `GET account/{account_id}/txns` Finds all the transactions for the given account
+    - [x] `GET account/{account_id}/likelyTokensFromBlock` Finds all the assets most likely to be [fungible] tokens for the given account from the given block
+    - [x] `GET account/{account_id}/likeleNFTsFromBlock` Finds all the assets most likely to be NFTs for the given account from the given block
+    - [ ] `POST account/create` Creates a new account with the given `account_id` and `public_key`
 
 ## Configuration
 
@@ -32,6 +38,7 @@ The server is configured using environment variables. The following variables ar
 - `BASE_SIGNER_SECRET_KEY` - Private key of the top-level account
 - `FUNDING_AMOUNT` - Amount of NEAR tokens to fund new accounts with (default 100NEAR)
 - `SERVER_PORT` - Port to listen on (default 10000)
+- [`contract-helper` feature] `DATABASE_URL` - PostgreSQL connection string to the ExplorerDB
 
 ## Getting Started
 

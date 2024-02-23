@@ -27,6 +27,7 @@ use serde::Deserialize;
 use tera::{Context, Tera};
 use tracing_subscriber::EnvFilter;
 
+#[cfg(feature = "contract-helper")]
 mod contract_helper;
 
 // ======== STRUCTURES ========
@@ -50,6 +51,7 @@ struct Args {
     /// Amount to fund new accounts with, default 100 NEAR
     #[clap(long, env, default_value_t = 100_000_000_000_000_000_000_000_000)]
     funding_amount: Balance,
+    #[cfg(feature = "contract-helper")]
     /// ExplorerDB connection string to fetch the data for contract-helper feature
     #[clap(long, env)]
     database_url: String,
@@ -353,6 +355,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let tera = Tera::new("templates/**/*").unwrap();
 
+    #[cfg(feature = "contract-helper")]
     let pool = sqlx::PgPool::connect(&args.database_url).await?;
 
     tracing::debug!("Parsing base signer account ID and secret key...");
@@ -410,15 +413,23 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Starting the HTTP server on port {}...", args.server_port);
 
     HttpServer::new(move || {
-        App::new()
+        #[allow(unused_mut)]
+        let mut app = App::new()
             .wrap(actix_cors::Cors::permissive())
             .app_data(web::Data::new(tera.clone()))
             .app_data(web::Data::new(near_data.clone()))
-            .app_data(web::Data::new(pool.clone()))
-            .service(contract_helper::account_scope())
             .service(fs::Files::new("/assets", "assets").show_files_listing()) // for serving the static files
             .route("/", web::get().to(index))
-            .route("/create_account", web::post().to(create_account))
+            .route("/create_account", web::post().to(create_account));
+
+        #[cfg(feature = "contract-helper")]
+        {
+            app = app
+                .app_data(web::Data::new(pool.clone()))
+                .service(contract_helper::account_scope());
+        }
+
+        app
     })
     .bind(format!("0.0.0.0:{:0>5}", args.server_port))?
     .run()
