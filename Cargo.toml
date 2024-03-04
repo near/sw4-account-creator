@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+actix-cors = "0.7.0"
 actix-web = "4.4.1"
 actix-files = "0.6.0"
 anyhow = "1.0.79"
@@ -21,3 +22,13 @@ tracing = "0.1.28"
 tracing-subscriber = "0.2.16"
 serde = { version = "1.0.130", features = ["derive"] }
 serde_json = "1.0.68"
+
+sqlx = { version = "0.7.3", features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "bigdecimal",
+], optional = true }
+
+[features]
+contract-helper = ["dep:sqlx"]
